@@ -57,46 +57,48 @@ jobs:
       # 7. Register model in Vertex AI Model Registry
       - name: Upload model to Vertex AI
         run: |
+          REGION=${{ env.REGION }}
+          PROJECT_ID=${{ vars.GCP_PROJECT_ID }}
           IMAGE_URI=${{ env.REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/trainer:${{ github.sha }}
 
-          # 1. create a dummy local artifact so Vertex AI has "model files"
+          # 1. Create dummy model artifact locally
           RUN_ID=${GITHUB_SHA}
-          mkdir -p model_dir
-          echo "placeholder model for commit $GITHUB_SHA" > model_dir/model.txt
+          mkdir -p local_model_artifact
+          echo "placeholder model for commit ${GITHUB_SHA}" > local_model_artifact/model.txt
 
-          # 2. choose a GCS path for this run
+          # 2. Define GCS location for this model version
           GCS_BUCKET="gs://my-ml-bucket-retailrocket"
-          ARTIFACT_PREFIX="models/${RUN_ID}"
-          ARTIFACT_GCS_URI="${GCS_BUCKET}/${ARTIFACT_PREFIX}"
+          ARTIFACT_PREFIX="models/${RUN_ID}/model"
+          ARTIFACT_GCS_DIR="${GCS_BUCKET}/${ARTIFACT_PREFIX}"
+          echo "Uploading artifacts to ${ARTIFACT_GCS_DIR}"
 
-          echo "Uploading artifacts to ${ARTIFACT_GCS_URI}"
+          # 3. Upload local_model_artifact/* directly into gs://.../model/
+          gsutil -m cp -r local_model_artifact/* "${ARTIFACT_GCS_DIR}/"
 
-          # 3. copy local model_dir -> GCS
-          # gsutil is available via gcloud sdk setup
-          gsutil -m cp -r model_dir "${ARTIFACT_GCS_URI}"
+          echo "Contents we just uploaded:"
+          gsutil ls -r "${ARTIFACT_GCS_DIR}"
 
-          # 4. now register the model in Vertex AI, using that GCS URI
+          # 4. Register model with Vertex AI, now pointing to that GCS dir
           gcloud ai models upload \
-            --region=${{ env.REGION }} \
+            --region=${REGION} \
             --display-name="${{ env.MODEL_DISPLAY_NAME }}" \
-            --container-image-uri=$IMAGE_URI \
+            --container-image-uri="${IMAGE_URI}" \
             --container-predict-route="/predict" \
             --container-health-route="/health" \
-            --artifact-uri="${ARTIFACT_GCS_URI}/model_dir" \
-            --labels=commit_sha=${{ github.sha }},repo=retailrocket > upload_result.txt
+            --artifact-uri="${ARTIFACT_GCS_DIR}" \
+            --labels=commit_sha=${GITHUB_SHA},repo=retailrocket > upload_result.txt
 
           echo "[INFO] Model upload result:"
           cat upload_result.txt
 
-          # 5. grab model resource name we just created
+          # 5. Grab model resource name we just created and store for next steps
           MODEL_ID=$(gcloud ai models list \
-            --region=${{ env.REGION }} \
+            --region=${REGION} \
             --filter="displayName=${{ env.MODEL_DISPLAY_NAME }}" \
             --format="value(name)" \
             | tail -n 1)
 
           echo "MODEL_ID=${MODEL_ID}" | tee model_id.txt
-
 
       # 8. Create endpoint if it doesn't exist yet
       - name: Ensure endpoint exists
