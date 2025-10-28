@@ -39,8 +39,7 @@ jobs:
 
       # 4. Configure Docker for Artifact Registry
       - name: Configure Docker auth for Artifact Registry
-        run: |
-          gcloud auth configure-docker $REGION-docker.pkg.dev -q
+        run: gcloud auth configure-docker $REGION-docker.pkg.dev -q
 
       # 5. Build Docker image tagged with commit SHA
       - name: Build Docker image
