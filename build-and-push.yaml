@@ -1,0 +1,61 @@
+name: Build and Push Trainer Image
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      REGION: us-central1
+      REPO_NAME: ml-repo
+
+    steps:
+      # 1. Checkout source code
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2. Auth to GCP using service account key from GitHub Secrets
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: "${{ secrets.GCP_SA_KEY }}"
+
+      # 3. Install gcloud CLI
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          export_default_credentials: true
+
+      # 4. Configure Docker to talk to Artifact Registry
+      - name: Configure Docker auth for Artifact Registry
+      /* this logs Docker into Artifact Registry using gcloud creds */
+        run: |
+          gcloud auth configure-docker $REGION-docker.pkg.dev -q
+
+      # 5. Build Docker image tagged with commit SHA
+      - name: Build Docker image
+        run: |
+          IMAGE_URI=${{ env.REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/trainer:${{ github.sha }}
+          echo "IMAGE_URI=$IMAGE_URI"
+          docker build -t $IMAGE_URI .
+
+      # 6. Push image to Artifact Registry
+      - name: Push Docker image
+        run: |
+          IMAGE_URI=${{ env.REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/trainer:${{ github.sha }}
+          docker push $IMAGE_URI
+
+      # 7. (Optional) Smoke test: print the image URI so we can feed it into Vertex AI CustomJob
+      - name: Output image URI
+        run: |
+          echo "Pushed image:"
+          echo "${{ env.REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/trainer:${{ github.sha }}"
