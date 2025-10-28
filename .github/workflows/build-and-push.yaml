@@ -1,4 +1,4 @@
-name: Build and Push Trainer Image
+name: Build, Push, and Deploy to Vertex
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-and-push:
+  build-push-deploy:
     runs-on: ubuntu-latest
 
     permissions:
@@ -16,9 +16,11 @@ jobs:
     env:
       REGION: us-central1
       REPO_NAME: ml-repo
+      ENDPOINT_NAME: retailrocket-endpoint
+      MODEL_DISPLAY_NAME: retailrocket-classifier
 
     steps:
-      # 1. Checkout source code
+      # 1. Checkout
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -28,32 +30,99 @@ jobs:
         with:
           credentials_json: "${{ secrets.GCP_SA_KEY }}"
 
-      # 3. Install gcloud CLI
+      # 3. Install gcloud SDK + Vertex AI CLI surface
       - name: Set up Google Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: ${{ vars.GCP_PROJECT_ID }}
           export_default_credentials: true
 
-      # 4. Configure Docker to talk to Artifact Registry
+      # 4. Configure Docker for Artifact Registry
       - name: Configure Docker auth for Artifact Registry
-        run: gcloud auth configure-docker $REGION-docker.pkg.dev -q
+        run: |
+          gcloud auth configure-docker $REGION-docker.pkg.dev -q
 
       # 5. Build Docker image tagged with commit SHA
       - name: Build Docker image
         run: |
           IMAGE_URI=${{ env.REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/trainer:${{ github.sha }}
-          echo "IMAGE_URI=$IMAGE_URI"
+          echo "IMAGE_URI=$IMAGE_URI" | tee image_uri.txt
           docker build -t $IMAGE_URI .
 
-      # 6. Push image to Artifact Registry
+      # 6. Push Docker image to Artifact Registry
       - name: Push Docker image
         run: |
           IMAGE_URI=${{ env.REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/trainer:${{ github.sha }}
           docker push $IMAGE_URI
 
-      # 7. (Optional) Smoke test: print the image URI so we can feed it into Vertex AI CustomJob
-      - name: Output image URI
+      # 7. Register model in Vertex AI Model Registry
+      - name: Upload model to Vertex AI
         run: |
-          echo "Pushed image:"
-          echo "${{ env.REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/trainer:${{ github.sha }}"
+          IMAGE_URI=${{ env.REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/trainer:${{ github.sha }}
+
+          # We'll create a simple model folder on the fly with a dummy model file
+          # In real life this comes from training artifacts in GCS,
+          # but here we just prove CD works.
+
+          mkdir -p model_dir
+          echo "placeholder model for commit $GITHUB_SHA" > model_dir/model.txt
+
+          # Upload model: this creates/versions a Model resource in Vertex AI
+          gcloud ai models upload \
+            --region=${{ env.REGION }} \
+            --display-name="${{ env.MODEL_DISPLAY_NAME }}" \
+            --container-image-uri=$IMAGE_URI \
+            --container-predict-route="/predict" \
+            --container-health-route="/health" \
+            --artifact-uri=./model_dir \
+            --labels=commit_sha=${{ github.sha }},repo=retailrocket
+
+          # Capture the model ID of what we just uploaded
+          MODEL_ID=$(gcloud ai models list \
+            --region=${{ env.REGION }} \
+            --filter="displayName=${{ env.MODEL_DISPLAY_NAME }}" \
+            --format="value(name)" \
+            | tail -n 1)
+
+          echo "MODEL_ID=${MODEL_ID}" | tee model_id.txt
+
+      # 8. Create endpoint if it doesn't exist yet
+      - name: Ensure endpoint exists
+        run: |
+          # Try to find endpoint
+          EP_ID=$(gcloud ai endpoints list \
+            --region=${{ env.REGION }} \
+            --filter="displayName=${{ env.ENDPOINT_NAME }}" \
+            --format="value(name)" \
+            | head -n 1)
+
+          if [ -z "$EP_ID" ]; then
+            echo "No endpoint found. Creating new endpoint ${{ env.ENDPOINT_NAME }} ..."
+            EP_ID=$(gcloud ai endpoints create \
+              --region=${{ env.REGION }} \
+              --display-name=${{ env.ENDPOINT_NAME }} \
+              --format="value(name)")
+          else
+            echo "Found endpoint: $EP_ID"
+          fi
+
+          echo "EP_ID=${EP_ID}" | tee endpoint_id.txt
+
+      # 9. Deploy new model to the endpoint (100% traffic)
+      - name: Deploy model to endpoint
+        run: |
+          MODEL_ID=$(cat model_id.txt | cut -d'=' -f2)
+          EP_ID=$(cat endpoint_id.txt | cut -d'=' -f2)
+
+          echo "Deploying MODEL_ID=$MODEL_ID to EP_ID=$EP_ID"
+
+          # Remove previous deployed models? We'll just send 100% traffic to new one.
+          # gcloud ai endpoints deploy-model will create a new deployedModel entry.
+          gcloud ai endpoints deploy-model $EP_ID \
+            --region=${{ env.REGION }} \
+            --model=$MODEL_ID \
+            --display-name="deploy-${GITHUB_SHA}" \
+            --machine-type="n1-standard-2" \
+            --traffic-split=0=100 \
+            --enable-access-logging \
+            --enable-container-logging
