@@ -138,5 +138,6 @@ jobs:
             --display-name="deploy-${GITHUB_SHA}" \
             --machine-type="n1-standard-2" \
             --traffic-split=0=100 \
-            --enable-access-logging \
-            --enable-container-logging
+            --min-replica-count=1 \
+            --max-replica-count=1
+
