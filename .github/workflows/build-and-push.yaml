@@ -59,24 +59,36 @@ jobs:
         run: |
           IMAGE_URI=${{ env.REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}/trainer:${{ github.sha }}
 
-          # We'll create a simple model folder on the fly with a dummy model file
-          # In real life this comes from training artifacts in GCS,
-          # but here we just prove CD works.
-
+          # 1. create a dummy local artifact so Vertex AI has "model files"
+          RUN_ID=${GITHUB_SHA}
           mkdir -p model_dir
           echo "placeholder model for commit $GITHUB_SHA" > model_dir/model.txt
 
-          # Upload model: this creates/versions a Model resource in Vertex AI
+          # 2. choose a GCS path for this run
+          GCS_BUCKET="gs://my-ml-bucket-retailrocket"
+          ARTIFACT_PREFIX="models/${RUN_ID}"
+          ARTIFACT_GCS_URI="${GCS_BUCKET}/${ARTIFACT_PREFIX}"
+
+          echo "Uploading artifacts to ${ARTIFACT_GCS_URI}"
+
+          # 3. copy local model_dir -> GCS
+          # gsutil is available via gcloud sdk setup
+          gsutil -m cp -r model_dir "${ARTIFACT_GCS_URI}"
+
+          # 4. now register the model in Vertex AI, using that GCS URI
           gcloud ai models upload \
             --region=${{ env.REGION }} \
             --display-name="${{ env.MODEL_DISPLAY_NAME }}" \
             --container-image-uri=$IMAGE_URI \
             --container-predict-route="/predict" \
             --container-health-route="/health" \
-            --artifact-uri=./model_dir \
-            --labels=commit_sha=${{ github.sha }},repo=retailrocket
+            --artifact-uri="${ARTIFACT_GCS_URI}/model_dir" \
+            --labels=commit_sha=${{ github.sha }},repo=retailrocket > upload_result.txt
 
-          # Capture the model ID of what we just uploaded
+          echo "[INFO] Model upload result:"
+          cat upload_result.txt
+
+          # 5. grab model resource name we just created
           MODEL_ID=$(gcloud ai models list \
             --region=${{ env.REGION }} \
             --filter="displayName=${{ env.MODEL_DISPLAY_NAME }}" \
@@ -84,6 +96,7 @@ jobs:
             | tail -n 1)
 
           echo "MODEL_ID=${MODEL_ID}" | tee model_id.txt
+
 
       # 8. Create endpoint if it doesn't exist yet
       - name: Ensure endpoint exists
